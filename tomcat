@@ -1,0 +1,397 @@
+#!/bin/bash
+
+set -e
+
+echo "===================================================="
+echo " TOMCAT 10 CLEAN INSTALLATION - UBUNTU 24.04 LTS"
+echo " Java 17 + Tomcat + Jenkins Deployment User"
+echo "===================================================="
+
+# --------------------------------------------------
+# Configuration
+# --------------------------------------------------
+
+TOMCAT_VERSION="10.1.57"
+TOMCAT_HOME="/opt/tomcat"
+
+TOMCAT_USERNAME="tomcat"
+TOMCAT_PASSWORD="root123456"
+
+SERVICE_USER="tomcat"
+
+
+# --------------------------------------------------
+# 1. Remove Existing Tomcat
+# --------------------------------------------------
+
+echo
+echo "Removing existing Tomcat installation..."
+
+sudo systemctl stop tomcat 2>/dev/null || true
+sudo systemctl disable tomcat 2>/dev/null || true
+
+sudo pkill -f "org.apache.catalina.startup.Bootstrap" 2>/dev/null || true
+
+sudo rm -f /etc/systemd/system/tomcat.service
+
+sudo rm -rf /opt/tomcat
+sudo rm -rf /opt/apache-tomcat-*
+
+sudo systemctl daemon-reload
+sudo systemctl reset-failed 2>/dev/null || true
+
+
+# --------------------------------------------------
+# 2. Update Ubuntu
+# --------------------------------------------------
+
+echo
+echo "Updating Ubuntu..."
+
+sudo apt-get update
+
+
+# --------------------------------------------------
+# 3. Install Java 17 and Utilities
+# --------------------------------------------------
+
+echo
+echo "Installing Java 17..."
+
+sudo apt-get install -y \
+    openjdk-17-jdk \
+    wget \
+    curl \
+    tar
+
+
+# --------------------------------------------------
+# 4. Verify Java
+# --------------------------------------------------
+
+echo
+echo "========== JAVA VERSION =========="
+
+java -version
+javac -version
+
+
+# --------------------------------------------------
+# 5. Detect JAVA_HOME
+# --------------------------------------------------
+
+JAVA_HOME=$(dirname $(dirname $(readlink -f $(which java))))
+
+echo
+echo "JAVA_HOME:"
+echo "${JAVA_HOME}"
+
+
+# --------------------------------------------------
+# 6. Create Tomcat Linux Service User
+# --------------------------------------------------
+
+echo
+echo "Creating Tomcat service user..."
+
+if ! id "${SERVICE_USER}" >/dev/null 2>&1
+then
+    sudo useradd \
+        --system \
+        --home ${TOMCAT_HOME} \
+        --shell /usr/sbin/nologin \
+        ${SERVICE_USER}
+fi
+
+
+# --------------------------------------------------
+# 7. Download Tomcat
+# --------------------------------------------------
+
+echo
+echo "Downloading Tomcat ${TOMCAT_VERSION}..."
+
+cd /opt
+
+sudo wget \
+https://dlcdn.apache.org/tomcat/tomcat-10/v${TOMCAT_VERSION}/bin/apache-tomcat-${TOMCAT_VERSION}.tar.gz
+
+
+# --------------------------------------------------
+# 8. Extract Tomcat
+# --------------------------------------------------
+
+echo
+echo "Extracting Tomcat..."
+
+sudo tar -xzf apache-tomcat-${TOMCAT_VERSION}.tar.gz
+
+
+# --------------------------------------------------
+# 9. Rename Tomcat Directory
+# --------------------------------------------------
+
+sudo mv \
+apache-tomcat-${TOMCAT_VERSION} \
+${TOMCAT_HOME}
+
+
+# --------------------------------------------------
+# 10. Remove Archive
+# --------------------------------------------------
+
+sudo rm -f \
+apache-tomcat-${TOMCAT_VERSION}.tar.gz
+
+
+# --------------------------------------------------
+# 11. Configure Tomcat Manager User
+# --------------------------------------------------
+
+echo
+echo "Configuring Tomcat Manager credentials..."
+
+sudo tee ${TOMCAT_HOME}/conf/tomcat-users.xml > /dev/null <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+
+<tomcat-users xmlns="http://tomcat.apache.org/xml"
+              xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+              xsi:schemaLocation="http://tomcat.apache.org/xml tomcat-users.xsd"
+              version="1.0">
+
+    <role rolename="manager-gui"/>
+    <role rolename="manager-script"/>
+    <role rolename="admin-gui"/>
+    <role rolename="admin-script"/>
+
+    <user username="${TOMCAT_USERNAME}"
+          password="${TOMCAT_PASSWORD}"
+          roles="manager-gui,manager-script,admin-gui,admin-script"/>
+
+</tomcat-users>
+EOF
+
+
+# --------------------------------------------------
+# 12. Enable Remote Manager Access
+# --------------------------------------------------
+
+echo
+echo "Enabling remote Manager access..."
+
+MANAGER_CONTEXT="${TOMCAT_HOME}/webapps/manager/META-INF/context.xml"
+
+sudo cp \
+${MANAGER_CONTEXT} \
+${MANAGER_CONTEXT}.backup
+
+sudo sed -i \
+'/<Valve className="org.apache.catalina.valves.RemoteAddrValve"/,/[[:space:]]*\/>/d' \
+${MANAGER_CONTEXT}
+
+
+# --------------------------------------------------
+# 13. Enable Remote Host Manager Access
+# --------------------------------------------------
+
+echo
+echo "Enabling remote Host Manager access..."
+
+HOST_CONTEXT="${TOMCAT_HOME}/webapps/host-manager/META-INF/context.xml"
+
+sudo cp \
+${HOST_CONTEXT} \
+${HOST_CONTEXT}.backup
+
+sudo sed -i \
+'/<Valve className="org.apache.catalina.valves.RemoteAddrValve"/,/[[:space:]]*\/>/d' \
+${HOST_CONTEXT}
+
+
+# --------------------------------------------------
+# 14. Set Permissions
+# --------------------------------------------------
+
+echo
+echo "Setting Tomcat permissions..."
+
+sudo chown -R \
+${SERVICE_USER}:${SERVICE_USER} \
+${TOMCAT_HOME}
+
+sudo chmod +x ${TOMCAT_HOME}/bin/*.sh
+
+
+# --------------------------------------------------
+# 15. Create systemd Service
+# --------------------------------------------------
+
+echo
+echo "Creating Tomcat systemd service..."
+
+sudo tee /etc/systemd/system/tomcat.service > /dev/null <<EOF
+[Unit]
+Description=Apache Tomcat 10 Web Application Server
+After=network.target
+
+[Service]
+Type=simple
+
+User=${SERVICE_USER}
+Group=${SERVICE_USER}
+
+Environment="JAVA_HOME=${JAVA_HOME}"
+Environment="CATALINA_HOME=${TOMCAT_HOME}"
+Environment="CATALINA_BASE=${TOMCAT_HOME}"
+
+ExecStart=${TOMCAT_HOME}/bin/catalina.sh run
+
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+
+# --------------------------------------------------
+# 16. Reload systemd
+# --------------------------------------------------
+
+sudo systemctl daemon-reload
+
+
+# --------------------------------------------------
+# 17. Enable Tomcat
+# --------------------------------------------------
+
+sudo systemctl enable tomcat
+
+
+# --------------------------------------------------
+# 18. Start Tomcat
+# --------------------------------------------------
+
+echo
+echo "Starting Tomcat..."
+
+sudo systemctl start tomcat
+
+
+# --------------------------------------------------
+# 19. Wait
+# --------------------------------------------------
+
+sleep 10
+
+
+# --------------------------------------------------
+# 20. Verify Service
+# --------------------------------------------------
+
+echo
+echo "=========================================="
+echo " TOMCAT STATUS"
+echo "=========================================="
+
+sudo systemctl status tomcat --no-pager
+
+
+# --------------------------------------------------
+# 21. Check Port
+# --------------------------------------------------
+
+echo
+echo "=========================================="
+echo " PORT 8080"
+echo "=========================================="
+
+sudo ss -lntp | grep 8080 || true
+
+
+# --------------------------------------------------
+# 22. Test Tomcat
+# --------------------------------------------------
+
+echo
+echo "=========================================="
+echo " TOMCAT HTTP TEST"
+echo "=========================================="
+
+curl -I http://localhost:8080/ || true
+
+
+# --------------------------------------------------
+# 23. Test Tomcat Manager API
+# --------------------------------------------------
+
+echo
+echo "=========================================="
+echo " TOMCAT MANAGER API TEST"
+echo "=========================================="
+
+curl -u ${TOMCAT_USERNAME}:${TOMCAT_PASSWORD} \
+http://localhost:8080/manager/text/list || true
+
+
+# --------------------------------------------------
+# 24. Final Information
+# --------------------------------------------------
+
+echo
+echo
+echo "===================================================="
+echo " TOMCAT INSTALLATION COMPLETED"
+echo "===================================================="
+
+echo
+echo "Tomcat Version:"
+echo "   ${TOMCAT_VERSION}"
+
+echo
+echo "Tomcat Home:"
+echo "   ${TOMCAT_HOME}"
+
+echo
+echo "Tomcat URL:"
+echo "   http://<EC2-PUBLIC-IP>:8080"
+
+echo
+echo "Tomcat Manager:"
+echo "   http://<EC2-PUBLIC-IP>:8080/manager/html"
+
+echo
+echo "Tomcat Manager API:"
+echo "   http://<EC2-PUBLIC-IP>:8080/manager/text"
+
+echo
+echo "=========================================="
+echo " TOMCAT LOGIN"
+echo "=========================================="
+
+echo "Username : ${TOMCAT_USERNAME}"
+echo "Password : ${TOMCAT_PASSWORD}"
+
+echo
+echo "=========================================="
+echo " JENKINS CREDENTIAL"
+echo "=========================================="
+
+echo "Credential Type : Username with password"
+echo "Credential ID   : tom-cred"
+echo "Username        : ${TOMCAT_USERNAME}"
+echo "Password        : ${TOMCAT_PASSWORD}"
+
+echo
+echo "=========================================="
+echo " USEFUL COMMANDS"
+echo "=========================================="
+
+echo "sudo systemctl status tomcat"
+echo "sudo systemctl restart tomcat"
+echo "sudo systemctl stop tomcat"
+echo "sudo journalctl -u tomcat -f"
+echo "sudo ss -lntp | grep 8080"
+
+echo
+echo "===================================================="
